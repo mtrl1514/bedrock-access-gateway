@@ -68,9 +68,9 @@ cr_inference_prefix = get_inference_region_prefix()
 SUPPORTED_BEDROCK_EMBEDDING_MODELS = {
     "cohere.embed-multilingual-v3": "Cohere Embed Multilingual",
     "cohere.embed-english-v3": "Cohere Embed English",
-    # Disable Titan embedding.
-    # "amazon.titan-embed-text-v1": "Titan Embeddings G1 - Text",
-    # "amazon.titan-embed-image-v1": "Titan Multimodal Embeddings G1"
+    #Disable Titan embedding.
+    "amazon.titan-embed-text-v1": "Titan Embeddings G1 - Text",
+    "amazon.titan-embed-image-v1": "Titan Multimodal Embeddings G1"
 }
 
 ENCODER = tiktoken.get_encoding("cl100k_base")
@@ -860,6 +860,8 @@ def get_embeddings_model(model_id: str) -> BedrockEmbeddingsModel:
     match model_name:
         case "Cohere Embed Multilingual" | "Cohere Embed English":
             return CohereEmbeddingsModel()
+        case "Titan Embeddings G1 - Text":
+            return TitanEmbeddingsModel()
         case _:
             logger.error("Unsupported model id " + model_id)
             raise HTTPException(
