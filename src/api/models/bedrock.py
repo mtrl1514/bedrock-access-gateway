@@ -13,6 +13,7 @@ import tiktoken
 from botocore.config import Config
 from fastapi import HTTPException
 from starlette.concurrency import run_in_threadpool
+from typing import List
 
 from api.models.base import BaseChatModel, BaseEmbeddingsModel
 from api.schema import (
@@ -152,6 +153,11 @@ class BedrockModel(BaseChatModel):
         """Common logic for invoke bedrock models"""
         if DEBUG:
             logger.info("Raw request: " + chat_request.model_dump_json())
+
+         # 현재 사용 중인 AWS 리전 로깅
+        current_region = bedrock_runtime.meta.region_name
+        logger.info(f"Current AWS Region: {current_region}")
+
 
         # convert OpenAI chat request to Bedrock SDK request
         args = self._parse_request(chat_request)
@@ -776,7 +782,134 @@ class BedrockEmbeddingsModel(BaseEmbeddingsModel, ABC):
             logger.info("Proxy response :" + response.model_dump_json())
         return response
 
+class CohereEmbeddingsModel(BedrockEmbeddingsModel):
+    def _create_overlapping_chunks(self, text: str, chunk_size: int = 2048, overlap: int = 200) -> list[str]:
+        """
+        텍스트를 겹치는 청크로 나눕니다.
+        :param text: 입력 텍스트
+        :param chunk_size: 각 청크의 최대 크기
+        :param overlap: 청크 간 겹치는 문자 수
+        :return: 겹치는 청크의 리스트
+        """
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = start + chunk_size
+            chunk = text[start:end]
+            chunks.append(chunk)
+            start = end - overlap
+        return chunks
 
+    def _parse_args(self, embeddings_request: EmbeddingsRequest) -> dict:
+        if isinstance(embeddings_request.input, str):
+            texts = [embeddings_request.input]
+        else:
+            texts = embeddings_request.input
+        
+        # 각 텍스트를 겹치는 청크로 분할
+        chunked_texts = []
+        for text in texts:
+            chunks = self._create_overlapping_chunks(text)
+            chunked_texts.extend(chunks)
+
+        return {"texts": chunked_texts}
+
+    def embed(self, embeddings_request: EmbeddingsRequest) -> EmbeddingsResponse:
+        args = self._parse_args(embeddings_request)
+        response = self._invoke_model(args=args, model_id=embeddings_request.model)
+        response_body = json.loads(response.get("body").read())
+        
+        if DEBUG:
+            logger.info("Bedrock response body: " + str(response_body))
+
+        # 원본 텍스트 수에 맞게 임베딩 결과 재구성
+        original_text_count = len(embeddings_request.input) if isinstance(embeddings_request.input, list) else 1
+        chunk_embeddings = response_body["embeddings"]
+        
+        aggregated_embeddings = []
+        chunk_index = 0
+        for _ in range(original_text_count):
+            text_chunks = self._create_overlapping_chunks(embeddings_request.input[_] if isinstance(embeddings_request.input, list) else embeddings_request.input)
+            text_chunk_embeddings = chunk_embeddings[chunk_index:chunk_index + len(text_chunks)]
+            chunk_index += len(text_chunks)
+            
+            # 청크 임베딩의 가중 평균 계산
+            weighted_embedding = np.average(text_chunk_embeddings, axis=0, weights=np.linspace(1, 0.5, len(text_chunk_embeddings)))
+            aggregated_embeddings.append(weighted_embedding.tolist())
+
+        return self._create_response(
+            embeddings=aggregated_embeddings,
+            model=embeddings_request.model,
+            input_tokens=response_body.get("tokenCount", sum(len(text) for text in args["texts"]))  # 대략적인 토큰 수 추정
+        )
+
+class TitanEmbeddingsModel(BedrockEmbeddingsModel):
+    def _create_overlapping_chunks(self, text: str, chunk_size: int = 2048, overlap: int = 200) -> List[str]:
+        """
+        텍스트를 겹치는 청크로 나눕니다.
+        :param text: 입력 텍스트
+        :param chunk_size: 각 청크의 최대 크기
+        :param overlap: 청크 간 겹치는 문자 수
+        :return: 겹치는 청크의 리스트
+        """
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = start + chunk_size
+            chunk = text[start:end]
+            chunks.append(chunk)
+            start = end - overlap
+        return chunks
+
+    def _parse_args(self, embeddings_request: EmbeddingsRequest) -> dict:
+        if isinstance(embeddings_request.input, str):
+            input_text = embeddings_request.input
+        elif isinstance(embeddings_request.input, list) and len(embeddings_request.input) == 1:
+            input_text = embeddings_request.input[0]
+        else:
+            raise ValueError("Amazon Titan Embeddings models support only single strings as input.")
+        
+        chunks = self._create_overlapping_chunks(input_text)
+        
+        args = {
+            "inputText": chunks[0],  # 첫 번째 청크로 시작
+            # Note: inputImage는 지원되지 않음!
+        }
+        if embeddings_request.model == "amazon.titan-embed-image-v1":
+            args["embeddingConfig"] = (
+                embeddings_request.embedding_config
+                if embeddings_request.embedding_config
+                else {"outputEmbeddingLength": 1024}
+            )
+        return args, chunks
+
+    def embed(self, embeddings_request: EmbeddingsRequest) -> EmbeddingsResponse:
+        args, chunks = self._parse_args(embeddings_request)
+        all_embeddings = []
+        total_tokens = 0
+
+        for chunk in chunks:
+            args["inputText"] = chunk
+            response = self._invoke_model(args=args, model_id=embeddings_request.model)
+            response_body = json.loads(response.get("body").read())
+            
+            if DEBUG:
+                logger.info("Bedrock response body: " + str(response_body))
+
+            all_embeddings.append(response_body["embedding"])
+            total_tokens += response_body["inputTextTokenCount"]
+
+        # 가중 평균 계산
+        weights = np.linspace(1, 0.5, len(all_embeddings))
+        weighted_average = np.average(all_embeddings, axis=0, weights=weights)
+
+        return self._create_response(
+            embeddings=[weighted_average.tolist()],  # 단일 임베딩으로 반환
+            model=embeddings_request.model,
+            input_tokens=total_tokens,
+        )
+
+""" Origin CohereEmbeddingsModel
 class CohereEmbeddingsModel(BedrockEmbeddingsModel):
     def _parse_args(self, embeddings_request: EmbeddingsRequest) -> dict:
         texts = []
@@ -818,8 +951,9 @@ class CohereEmbeddingsModel(BedrockEmbeddingsModel):
             model=embeddings_request.model,
             encoding_format=embeddings_request.encoding_format,
         )
+ """
 
-
+""" Origin TitanEmbeddingsModel
 class TitanEmbeddingsModel(BedrockEmbeddingsModel):
     def _parse_args(self, embeddings_request: EmbeddingsRequest) -> dict:
         if isinstance(embeddings_request.input, str):
@@ -851,6 +985,8 @@ class TitanEmbeddingsModel(BedrockEmbeddingsModel):
             model=embeddings_request.model,
             input_tokens=response_body["inputTextTokenCount"],
         )
+
+ """
 
 
 def get_embeddings_model(model_id: str) -> BedrockEmbeddingsModel:
