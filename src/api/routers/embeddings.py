@@ -20,7 +20,7 @@ async def embeddings(
         Body(
             examples=[
                 {
-                    "model": "amazon.titan-embed-text-v1",
+                    "model": "cohere.embed-multilingual-v3",
                     "input": ["Your text string goes here"],
                 }
             ],
