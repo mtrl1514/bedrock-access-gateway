@@ -788,14 +788,19 @@ class CohereEmbeddingsModel(BedrockEmbeddingsModel):
     def _create_chunks(self, text: str, chunk_size: int = 2048) -> List[str]:
         return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
 
-    
     def _parse_args(self, embeddings_request: EmbeddingsRequest) -> List[dict]:
+        logger.info(f"Received input type: {type(embeddings_request.input)}")
+        logger.info(f"Received input: {embeddings_request.input}")
+
         all_chunks = []
         if isinstance(embeddings_request.input, str):
             all_chunks = self._create_chunks(embeddings_request.input)
         elif isinstance(embeddings_request.input, list):
-            for text in embeddings_request.input:
-                all_chunks.extend(self._create_chunks(text))
+            if all(isinstance(item, str) for item in embeddings_request.input):
+                for text in embeddings_request.input:
+                    all_chunks.extend(self._create_chunks(text))
+            else:
+                raise ValueError("All items in the list must be strings")
         elif isinstance(embeddings_request.input, Iterable):
             # For encoded input
             decoded_text = ""
@@ -803,10 +808,14 @@ class CohereEmbeddingsModel(BedrockEmbeddingsModel):
                 if isinstance(inner, int):
                     # Iterable[int]
                     decoded_text += ENCODER.decode([inner])
-                else:
+                elif isinstance(inner, Iterable):
                     # Iterable[Iterable[int]]
                     decoded_text += ENCODER.decode(list(inner))
+                else:
+                    raise ValueError(f"Unsupported input type in iterable: {type(inner)}")
             all_chunks = self._create_chunks(decoded_text)
+        else:
+            raise ValueError(f"Unsupported input type: {type(embeddings_request.input)}. Expected string, list of strings, or iterable of integers.")
 
         return [{"texts": [chunk], "input_type": "search_document", "truncate": "END"} for chunk in all_chunks]
 
@@ -816,14 +825,18 @@ class CohereEmbeddingsModel(BedrockEmbeddingsModel):
         total_tokens = 0
 
         for args in all_args:
-            response = self._invoke_model(args=args, model_id=embeddings_request.model)
-            response_body = json.loads(response.get("body").read())
-            
-            if DEBUG:
-                logger.info("Bedrock response body: " + str(response_body))
+            try:
+                response = self._invoke_model(args=args, model_id=embeddings_request.model)
+                response_body = json.loads(response.get("body").read())
+                
+                if DEBUG:
+                    logger.info("Bedrock response body: " + str(response_body))
 
-            all_embeddings.extend(response_body["embeddings"])
-            total_tokens += response_body.get("tokenCount", 0)
+                all_embeddings.extend(response_body["embeddings"])
+                total_tokens += response_body.get("tokenCount", 0)
+            except Exception as e:
+                logger.error(f"Error during embedding: {str(e)}")
+                raise
 
         # 모든 청크의 임베딩을 평균내어 최종 임베딩 생성
         final_embedding = np.mean(all_embeddings, axis=0).tolist()
@@ -842,12 +855,17 @@ class TitanEmbeddingsModel(BedrockEmbeddingsModel):
 
     def _parse_args(self, embeddings_request: EmbeddingsRequest) -> List[dict]:
         if isinstance(embeddings_request.input, str):
-            chunks = self._create_chunks(embeddings_request.input)
-        elif isinstance(embeddings_request.input, list) and len(embeddings_request.input) == 1:
-            chunks = self._create_chunks(embeddings_request.input[0])
+            input_text = embeddings_request.input
+        elif isinstance(embeddings_request.input, list):
+            if len(embeddings_request.input) == 1:
+                input_text = embeddings_request.input[0]
+            else:
+                # 여러 문자열을 하나로 결합
+                input_text = " ".join(embeddings_request.input)
         else:
-            raise ValueError("Amazon Titan Embeddings models support only single strings as input.")
+            raise ValueError("Amazon Titan Embeddings models support only string or list of strings as input.")
 
+        chunks = self._create_chunks(input_text)
         args_list = []
         for chunk in chunks:
             args = {
