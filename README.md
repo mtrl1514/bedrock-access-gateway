@@ -30,6 +30,26 @@ If you find this GitHub repository useful, please consider giving it a free star
 
 Please check [Usage Guide](./docs/Usage.md) for more details about how to use the new APIs.
 
+## Testing
+
+For comprehensive testing instructions, see [TESTING.md](TESTING.md).
+
+### Quick Test
+```bash
+# Health check
+curl http://localhost:8000/health
+
+# Chat API (Azure style)
+curl -X POST "http://localhost:8000/openai/deployments/gpt-4/chat/completions?api-version=2024-02-15-preview" \
+  -H "Content-Type: application/json" \
+  -H "api-key: bedrock" \
+  --data-binary "@test/test_chat.json"
+
+# Run all tests
+./scripts/test_all.sh  # Linux/Mac
+.\scripts\test_all.ps1  # Windows
+```
+
 
 ## Get Started
 

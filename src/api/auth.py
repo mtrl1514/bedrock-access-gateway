@@ -4,7 +4,7 @@ from typing import Annotated
 
 import boto3
 from botocore.exceptions import ClientError
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Header
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from api.setting import DEFAULT_API_KEYS
@@ -42,3 +42,10 @@ def api_key_auth(
 ):
     if credentials.credentials != api_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
+
+# Azure 스타일 API용 인증 함수
+def azure_api_key_auth(
+    api_key_header: str = Header(..., alias="api-key")
+):
+    if api_key_header != api_key:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")

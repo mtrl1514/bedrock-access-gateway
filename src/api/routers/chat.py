@@ -15,9 +15,7 @@ router = APIRouter(
 )
 
 
-@router.post(
-    "/completions", response_model=ChatResponse | ChatStreamResponse | Error, response_model_exclude_unset=True
-)
+@router.post("/completions")
 async def chat_completions(
     chat_request: Annotated[
         ChatRequest,

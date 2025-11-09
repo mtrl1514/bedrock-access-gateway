@@ -40,12 +40,13 @@ from api.schema import (
     Usage,
     UserMessage,
 )
-from api.setting import AWS_REGION, DEBUG, DEFAULT_MODEL, ENABLE_CROSS_REGION_INFERENCE
+from api.setting import AWS_REGION, AWS_REGION_VISION, DEBUG, DEFAULT_MODEL, ENABLE_CROSS_REGION_INFERENCE
 
 logger = logging.getLogger(__name__)
 
 config = Config(connect_timeout=60, read_timeout=120, retries={"max_attempts": 1})
 
+# 기본 리전 클라이언트 (채팅 및 텍스트 임베딩용)
 bedrock_runtime = boto3.client(
     service_name="bedrock-runtime",
     region_name=AWS_REGION,
@@ -54,6 +55,18 @@ bedrock_runtime = boto3.client(
 bedrock_client = boto3.client(
     service_name="bedrock",
     region_name=AWS_REGION,
+    config=config,
+)
+
+# 비전 임베딩용 클라이언트
+bedrock_runtime_vision = boto3.client(
+    service_name="bedrock-runtime",
+    region_name=AWS_REGION_VISION,
+    config=config,
+)
+bedrock_client_vision = boto3.client(
+    service_name="bedrock",
+    region_name=AWS_REGION_VISION,
     config=config,
 )
 
@@ -72,7 +85,8 @@ SUPPORTED_BEDROCK_EMBEDDING_MODELS = {
     "cohere.embed-english-v3": "Cohere Embed English",
     "amazon.titan-embed-text-v1": "Titan Embeddings G1 - Text",
     "amazon.titan-embed-text-v2:0": "Titan Text Embeddings V2",
-    "amazon.titan-embed-image-v1": "Titan Multimodal Embeddings G1"
+    "amazon.titan-embed-image-v1": "Titan Multimodal Embeddings G1",
+    "twelvelabs.marengo-embed-3-0-v1:0": "TwelveLabs Marengo Embed"
 }
 
 ENCODER = tiktoken.get_encoding("cl100k_base")
@@ -155,9 +169,10 @@ class BedrockModel(BaseChatModel):
         if DEBUG:
             logger.info("Raw request: " + chat_request.model_dump_json())
 
-         # 현재 사용 중인 AWS 리전 로깅
+                 # 현재 사용 중인 AWS 리전 로깅
         current_region = bedrock_runtime.meta.region_name
-        logger.info(f"Current AWS Region: {current_region}")
+        logger.info(f"Current AWS Region for chat: {current_region}")
+        logger.info(f"Vision embedding region: {AWS_REGION_VISION}")
 
 
         # convert OpenAI chat request to Bedrock SDK request
@@ -733,21 +748,33 @@ class BedrockEmbeddingsModel(BaseEmbeddingsModel, ABC):
     content_type = "application/json"
 
     def _invoke_model(self, args: dict, model_id: str):
-        body = json.dumps(args)
+        import json
+        
         if DEBUG:
             logger.info("Invoke Bedrock Model: " + model_id)
-            logger.info("Bedrock request body: " + body)
+            logger.info("Bedrock request args: " + str({k: type(v).__name__ for k, v in args.items()}))
+        
+        body = json.dumps(args)
+        
+        # 비전 임베딩 모델은 AWS_REGION_VISION 사용
+        if "image" in model_id or "twelvelabs" in model_id:
+            client = bedrock_runtime_vision
+            logger.info(f"Using vision region ({AWS_REGION_VISION}) for model: {model_id}")
+        else:
+            client = bedrock_runtime
+            logger.info(f"Using default region ({AWS_REGION}) for model: {model_id}")
+            
         try:
-            return bedrock_runtime.invoke_model(
+            return client.invoke_model(
                 body=body,
                 modelId=model_id,
                 accept=self.accept,
                 contentType=self.content_type,
             )
-        except bedrock_runtime.exceptions.ValidationException as e:
+        except client.exceptions.ValidationException as e:
             logger.error("Validation Error: " + str(e))
             raise HTTPException(status_code=400, detail=str(e))
-        except bedrock_runtime.exceptions.ThrottlingException as e:
+        except client.exceptions.ThrottlingException as e:
             logger.error("Throttling Error: " + str(e))
             raise HTTPException(status_code=429, detail=str(e))
         except Exception as e:
@@ -791,7 +818,13 @@ class CohereEmbeddingsModel(BedrockEmbeddingsModel):
     def _parse_args(self, embeddings_request: EmbeddingsRequest) -> List[dict]:
         logger.info(f"Received input type: {type(embeddings_request.input)}")
         logger.info(f"Received input: {embeddings_request.input}")
+        logger.info(f"Model ID: {embeddings_request.model}")
 
+        # 이미지 임베딩 모델인지 확인 (Cohere는 이미지 임베딩을 지원하지 않음)
+        if "image" in embeddings_request.model:
+            raise ValueError("Cohere models do not support image embedding. Use appropriate image embedding model.")
+        
+        # 텍스트 임베딩 처리 (기존 로직)
         all_chunks = []
         if isinstance(embeddings_request.input, str):
             all_chunks = self._create_chunks(embeddings_request.input)
@@ -828,15 +861,16 @@ class CohereEmbeddingsModel(BedrockEmbeddingsModel):
             try:
                 response = self._invoke_model(args=args, model_id=embeddings_request.model)
                 response_body = json.loads(response.get("body").read())
-                
-                if DEBUG:
-                    logger.info("Bedrock response body: " + str(response_body))
 
+                # 텍스트 임베딩 응답 처리
                 all_embeddings.extend(response_body["embeddings"])
                 total_tokens += response_body.get("tokenCount", 0)
             except Exception as e:
                 logger.error(f"Error during embedding: {str(e)}")
                 raise
+
+        if not all_embeddings:
+            raise ValueError("No embeddings returned from the model")
 
         # 모든 청크의 임베딩을 평균내어 최종 임베딩 생성
         final_embedding = np.mean(all_embeddings, axis=0).tolist()
@@ -854,32 +888,50 @@ class TitanEmbeddingsModel(BedrockEmbeddingsModel):
         return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
 
     def _parse_args(self, embeddings_request: EmbeddingsRequest) -> List[dict]:
-        if isinstance(embeddings_request.input, str):
-            input_text = embeddings_request.input
-        elif isinstance(embeddings_request.input, list):
-            if len(embeddings_request.input) == 1:
-                input_text = embeddings_request.input[0]
+        if embeddings_request.model == "amazon.titan-embed-image-v1":
+            # 이미지 임베딩 모델 처리
+            if isinstance(embeddings_request.input, str):
+                # Base64 인코딩된 이미지 데이터 처리
+                image_data = embeddings_request.input
+                
+                # data:image/format;base64, prefix 제거
+                if image_data.startswith('data:image'):
+                    image_data = image_data.split(',', 1)[1] if ',' in image_data else image_data
+                
+                try:
+                    args = {
+                        "inputImage": image_data,
+                        "embeddingConfig": {
+                            "outputEmbeddingLength": 1024
+                        }
+                    }
+                    return [args]
+                except Exception as e:
+                    raise ValueError(f"Invalid base64 image data: {str(e)}")
             else:
-                # 여러 문자열을 하나로 결합
-                input_text = " ".join(embeddings_request.input)
+                raise ValueError("Amazon Titan Image Embeddings model requires base64 encoded image string as input.")
         else:
-            raise ValueError("Amazon Titan Embeddings models support only string or list of strings as input.")
+            # 텍스트 임베딩 모델 처리
+            if isinstance(embeddings_request.input, str):
+                input_text = embeddings_request.input
+            elif isinstance(embeddings_request.input, list):
+                if len(embeddings_request.input) == 1:
+                    input_text = embeddings_request.input[0]
+                else:
+                    # 여러 문자열을 하나로 결합
+                    input_text = " ".join(embeddings_request.input)
+            else:
+                raise ValueError("Amazon Titan Text Embeddings models support only string or list of strings as input.")
 
-        chunks = self._create_chunks(input_text)
-        args_list = []
-        for chunk in chunks:
-            args = {
-                "inputText": chunk,
-            }
-            if embeddings_request.model == "amazon.titan-embed-image-v1":
-                args["embeddingConfig"] = (
-                    embeddings_request.embedding_config
-                    if embeddings_request.embedding_config
-                    else {"outputEmbeddingLength": 1024}
-                )
-            args_list.append(args)
+            chunks = self._create_chunks(input_text)
+            args_list = []
+            for chunk in chunks:
+                args = {
+                    "inputText": chunk,
+                }
+                args_list.append(args)
 
-        return args_list
+            return args_list
 
     def embed(self, embeddings_request: EmbeddingsRequest) -> EmbeddingsResponse:
         all_args = self._parse_args(embeddings_request)
@@ -893,10 +945,16 @@ class TitanEmbeddingsModel(BedrockEmbeddingsModel):
             if DEBUG:
                 logger.info("Bedrock response body: " + str(response_body))
 
-            all_embeddings.append(response_body["embedding"])
-            total_tokens += response_body["inputTextTokenCount"]
+            if embeddings_request.model == "amazon.titan-embed-image-v1":
+                # 이미지 임베딩 모델 응답 처리
+                all_embeddings.append(response_body["embedding"])
+                total_tokens += response_body.get("inputTokens", 0)
+            else:
+                # 텍스트 임베딩 모델 응답 처리
+                all_embeddings.append(response_body["embedding"])
+                total_tokens += response_body["inputTextTokenCount"]
 
-        # 모든 청크의 임베딩을 평균내어 최종 임베딩 생성
+                # 모든 청크의 임베딩을 평균내어 최종 임베딩 생성
         final_embedding = np.mean(all_embeddings, axis=0).tolist()
 
         return self._create_response(
@@ -906,84 +964,62 @@ class TitanEmbeddingsModel(BedrockEmbeddingsModel):
         )
 
 
-""" Origin CohereEmbeddingsModel
-class CohereEmbeddingsModel(BedrockEmbeddingsModel):
-    def _parse_args(self, embeddings_request: EmbeddingsRequest) -> dict:
-        texts = []
+class TwelveLabsEmbeddingsModel(BedrockEmbeddingsModel):
+    def _parse_args(self, embeddings_request: EmbeddingsRequest) -> List[dict]:
         if isinstance(embeddings_request.input, str):
-            texts = [embeddings_request.input]
-        elif isinstance(embeddings_request.input, list):
-            texts = embeddings_request.input
-        elif isinstance(embeddings_request.input, Iterable):
-            # For encoded input
-            # The workaround is to use tiktoken to decode to get the original text.
-            encodings = []
-            for inner in embeddings_request.input:
-                if isinstance(inner, int):
-                    # Iterable[int]
-                    encodings.append(inner)
-                else:
-                    # Iterable[Iterable[int]]
-                    text = ENCODER.decode(list(inner))
-                    texts.append(text)
-            if encodings:
-                texts.append(ENCODER.decode(encodings))
-
-        # Maximum of 2048 characters
-        args = {
-            "texts": texts,
-            "input_type": "search_document",
-            "truncate": "END",  # "NONE|START|END"
-        }
-        return args
+            # Base64 인코딩된 이미지 데이터 처리
+            image_data = embeddings_request.input
+            if image_data.startswith('data:image'):
+                # data:image/png;base64, 형식에서 base64 데이터만 추출
+                image_data = image_data.split(',', 1)[1] if ',' in image_data else image_data
+            
+            return [{
+                "inputType": "image",
+                "image": {
+                    "base64": image_data
+                }
+            }]
+        else:
+            raise ValueError("TwelveLabs model requires base64 encoded image string as input.")
 
     def embed(self, embeddings_request: EmbeddingsRequest) -> EmbeddingsResponse:
-        response = self._invoke_model(args=self._parse_args(embeddings_request), model_id=embeddings_request.model)
-        response_body = json.loads(response.get("body").read())
-        if DEBUG:
-            logger.info("Bedrock response body: " + str(response_body))
+        all_args = self._parse_args(embeddings_request)
+        all_embeddings = []
+        total_tokens = 0
 
+        for args in all_args:
+            try:
+                response = self._invoke_model(args=args, model_id=embeddings_request.model)
+                response_body = json.loads(response.get("body").read())
+                
+                if DEBUG:
+                    logger.info("TwelveLabs response body: " + str(response_body))
+
+                # TwelveLabs 응답 형식 처리
+                embeddings = response_body.get("embeddings", [])
+                if embeddings:
+                    all_embeddings.extend(embeddings)
+                
+                # 토큰 사용량 처리
+                usage = response_body.get("usage", {})
+                total_tokens += usage.get("total_tokens", usage.get("input_tokens", 0))
+                
+            except Exception as e:
+                logger.error(f"Error during TwelveLabs embedding: {str(e)}")
+                raise
+
+        if not all_embeddings:
+            raise ValueError("No embeddings returned from TwelveLabs model")
+
+        # 임베딩 처리 (단일 이미지의 경우 평균화하지 않음)
+        final_embedding = all_embeddings[0] if len(all_embeddings) == 1 else np.mean(all_embeddings, axis=0).tolist()
+        
         return self._create_response(
-            embeddings=response_body["embeddings"],
+            embeddings=[final_embedding],
             model=embeddings_request.model,
+            input_tokens=total_tokens,
             encoding_format=embeddings_request.encoding_format,
         )
-"""
-
-""" Origin TitanEmbeddingsModel
-class TitanEmbeddingsModel(BedrockEmbeddingsModel):
-    def _parse_args(self, embeddings_request: EmbeddingsRequest) -> dict:
-        if isinstance(embeddings_request.input, str):
-            input_text = embeddings_request.input
-        elif isinstance(embeddings_request.input, list) and len(embeddings_request.input) == 1:
-            input_text = embeddings_request.input[0]
-        else:
-            raise ValueError("Amazon Titan Embeddings models support only single strings as input.")
-        args = {
-            "inputText": input_text,
-            # Note: inputImage is not supported!
-        }
-        if embeddings_request.model == "amazon.titan-embed-image-v1":
-            args["embeddingConfig"] = (
-                embeddings_request.embedding_config
-                if embeddings_request.embedding_config
-                else {"outputEmbeddingLength": 1024}
-            )
-        return args
-
-    def embed(self, embeddings_request: EmbeddingsRequest) -> EmbeddingsResponse:
-        response = self._invoke_model(args=self._parse_args(embeddings_request), model_id=embeddings_request.model)
-        response_body = json.loads(response.get("body").read())
-        if DEBUG:
-            logger.info("Bedrock response body: " + str(response_body))
-
-        return self._create_response(
-            embeddings=[response_body["embedding"]],
-            model=embeddings_request.model,
-            input_tokens=response_body["inputTextTokenCount"],
-        )
-"""
-
 
 
 def get_embeddings_model(model_id: str) -> BedrockEmbeddingsModel:
@@ -991,15 +1027,21 @@ def get_embeddings_model(model_id: str) -> BedrockEmbeddingsModel:
     
     if DEBUG:
         logger.info("model name is " + model_name)
+    
     if model_name.startswith("Cohere"):
         logger.info("model name is Cohere")
         return CohereEmbeddingsModel()
     elif model_name.startswith("Titan"):
         logger.info("model name is Titan")
         return TitanEmbeddingsModel()
+    elif model_name.startswith("TwelveLabs"):
+        logger.info("model name is TwelveLabs")
+        return TwelveLabsEmbeddingsModel()
     else:
         logger.error(f"Unsupported model id {model_id}")
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported embedding model id {model_id}",
         )
+
+
