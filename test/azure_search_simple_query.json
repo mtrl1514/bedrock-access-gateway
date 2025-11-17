@@ -1,0 +1,8 @@
+{
+  "search": "artificial intelligence",
+  "top": 10,
+  "skip": 0,
+  "select": "id,title,content,category,rating",
+  "searchMode": "any",
+  "queryType": "simple"
+}

@@ -1,0 +1,9 @@
+{
+  "search": "검색",
+  "filter": "owning_user eq 'admin@company.com'",
+  "orderby": "last_modified_date desc",
+  "top": 5,
+  "select": "id,content,owning_user,owning_group,last_modified_date",
+  "searchMode": "all",
+  "queryType": "simple"
+}

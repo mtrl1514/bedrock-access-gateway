@@ -7,3 +7,7 @@ requests==2.32.3
 numpy==1.26.4
 boto3==1.37.0
 botocore==1.37.0
+python-dotenv==1.0.0
+# OpenSearch Serverless dependencies
+opensearch-py==2.4.2
+requests-aws4auth==1.2.3

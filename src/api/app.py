@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from mangum import Mangum
 
-from api.routers import chat, embeddings, model, azure_style
+from api.routers import chat, embeddings, model, azure_style, azure_search
 from api.setting import API_ROUTE_PREFIX, DESCRIPTION, SUMMARY, TITLE, VERSION
 
 config = {
@@ -38,6 +38,9 @@ app.include_router(embeddings.router, prefix=API_ROUTE_PREFIX)
 
 # Azure-style API routes (without prefix)
 app.include_router(azure_style.router)
+
+# Azure AI Search API routes (without prefix)
+app.include_router(azure_search.router)
 @app.get("/health")
 async def health():
     """For health check if needed"""

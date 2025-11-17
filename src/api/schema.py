@@ -184,3 +184,115 @@ class ErrorMessage(BaseModel):
 
 class Error(BaseModel):
     error: ErrorMessage
+
+
+# =============================================================================
+# Azure AI Search 호환 스키마
+# =============================================================================
+
+class SearchField(BaseModel):
+    """검색 인덱스 필드"""
+    name: str
+    type: str
+    key: bool = False
+    searchable: bool = False
+    filterable: bool = False
+    sortable: bool = False
+    facetable: bool = False
+    retrievable: bool = True
+    analyzer: str | None = None
+    # 벡터 검색 지원 - 여러 필드명 지원
+    dimensions: int | None = None  # JSON에서 직접 사용
+    vector_search_dimensions: int | None = Field(None, alias="vectorSearchDimensions")
+    vector_search_profile: str | None = Field(None, alias="vectorSearchProfile")
+    vector_search_profile_name: str | None = Field(None, alias="vectorSearchProfileName")
+
+
+class VectorSearchAlgorithmConfig(BaseModel):
+    """벡터 검색 알고리즘 설정"""
+    name: str
+    kind: Literal["hnsw"] = "hnsw"
+    hnsw_parameters: dict | None = Field(None, alias="hnswParameters")
+
+
+class VectorSearchProfile(BaseModel):
+    """벡터 검색 프로필"""
+    name: str
+    algorithm_configuration_name: str = Field(alias="algorithmConfigurationName")
+    vectorizer: str | None = None
+
+
+class VectorSearch(BaseModel):
+    """벡터 검색 설정"""
+    algorithms: list[VectorSearchAlgorithmConfig] | None = None
+    profiles: list[VectorSearchProfile] | None = None
+
+
+class SearchIndex(BaseModel):
+    """검색 인덱스"""
+    name: str
+    fields: list[SearchField]
+    vector_search: VectorSearch | None = Field(None, alias="vectorSearch")
+    e_tag: str | None = Field(None, alias="@odata.etag")
+
+
+class IndexAction(BaseModel):
+    """문서 인덱싱 액션"""
+    search_action: Literal["upload", "merge", "mergeOrUpload", "delete"] = Field(alias="@search.action")
+    
+    class Config:
+        extra = "allow"  # 동적 필드 허용
+
+
+class IndexBatch(BaseModel):
+    """배치 인덱싱 요청"""
+    value: list[IndexAction]
+
+
+class IndexingResult(BaseModel):
+    """인덱싱 결과"""
+    key: str
+    status: bool
+    error_message: str | None = Field(None, alias="errorMessage")
+    status_code: int = Field(alias="statusCode")
+
+
+class IndexBatchResult(BaseModel):
+    """배치 인덱싱 결과"""
+    value: list[IndexingResult]
+
+
+class VectorizedQuery(BaseModel):
+    """벡터 쿼리"""
+    vector: list[float] = Field(alias="value")
+    k_nearest_neighbors: int = Field(alias="k")
+    fields: str
+
+
+class SearchRequest(BaseModel):
+    """검색 요청"""
+    search: str | None = None
+    search_fields: str | None = Field(None, alias="searchFields")
+    select: str | None = None
+    filter: str | None = None
+    order_by: str | None = Field(None, alias="orderby")
+    top: int | None = None
+    skip: int | None = None
+    include_total_count: bool | None = Field(None, alias="includeTotalCount")
+    vectors: list[VectorizedQuery] | None = None  # JSON과 매칭
+    vector_queries: list[VectorizedQuery] | None = Field(None, alias="vectorQueries")
+
+
+class SearchResult(BaseModel):
+    """검색 결과"""
+    search_score: float | None = Field(None, alias="@search.score")
+    
+    class Config:
+        extra = "allow"  # 동적 필드 허용
+
+
+class SearchResponse(BaseModel):
+    """검색 응답"""
+    odata_context: str = Field(alias="@odata.context")
+    odata_count: int | None = Field(None, alias="@odata.count")
+    value: list[SearchResult]
