@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import StreamingResponse
 
 from api.auth import api_key_auth
@@ -22,7 +22,7 @@ async def chat_completions(
         Body(
             examples=[
                 {
-                    "model": "anthropic.claude-3-sonnet-20240229-v1:0",
+                    "model": "apac.anthropic.claude-sonnet-4-20250514-v1:0",
                     "messages": [
                         {"role": "system", "content": "You are a helpful assistant."},
                         {"role": "user", "content": "Hello!"},
@@ -31,9 +31,14 @@ async def chat_completions(
             ],
         ),
     ],
+    stream: bool = Query(False, description="If true, return a streaming response"),
 ):
     if chat_request.model.lower().startswith("gpt-"):
         chat_request.model = DEFAULT_MODEL
+
+    # Query parameter overrides body parameter for stream
+    if stream is not None:
+        chat_request.stream = stream
 
     # Exception will be raised if model not supported.
     model = BedrockModel()
